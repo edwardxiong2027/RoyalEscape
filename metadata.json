@@ -1,0 +1,5 @@
+{
+  "name": "Royal Escape",
+  "description": "A strategic sliding block puzzle game based on the classic Klotski (Huarong Dao). Help the King escape the board!",
+  "requestFramePermissions": []
+}

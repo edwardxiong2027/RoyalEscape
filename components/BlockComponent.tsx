@@ -89,6 +89,10 @@ export const BlockComponent = forwardRef<HTMLDivElement, BlockProps>(
     cleanupDrag();
   };
 
+  const handleMouseUp = () => {
+    cleanupDrag();
+  };
+
   const cleanupDrag = () => {
     mouseStart.current = null;
     dragging.current = false;

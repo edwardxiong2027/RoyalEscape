@@ -18,6 +18,7 @@ export const BlockComponent = forwardRef<HTMLDivElement, BlockProps>(
   ({ block, isSelected, hintDirection, onClick, onSwipe, unitSize, gap, tabIndex = -1, onKeyDown, onFocus, ...rest }, ref) => {
   const touchStart = useRef<{x: number, y: number} | null>(null);
   const mouseStart = useRef<{x: number, y: number} | null>(null);
+  const dragging = useRef<boolean>(false);
 
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -45,36 +46,71 @@ export const BlockComponent = forwardRef<HTMLDivElement, BlockProps>(
     touchStart.current = null;
   };
 
+
+  // Mouse drag logic for desktop
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return; // Only left click
     mouseStart.current = { x: e.clientX, y: e.clientY };
+    dragging.current = false;
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUpWindow);
   };
 
-  const handleMouseUp = (e: React.MouseEvent) => {
+  const handleMouseMove = (e: MouseEvent) => {
     if (!mouseStart.current) return;
-
     const dx = e.clientX - mouseStart.current.x;
     const dy = e.clientY - mouseStart.current.y;
-
-    // Same threshold as touch; treat as swipe if movement is meaningful
-    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-        e.stopPropagation();
-
-        if (Math.abs(dx) > Math.abs(dy)) {
-            onSwipe(block.id, dx > 0 ? Direction.RIGHT : Direction.LEFT);
-        } else {
-            onSwipe(block.id, dy > 0 ? Direction.DOWN : Direction.UP);
-        }
+    if (!dragging.current && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+      dragging.current = true;
     }
+    if (dragging.current) {
+      // Only trigger on direction change
+      if (Math.abs(dx) > Math.abs(dy)) {
+        if (dx > 20) {
+          onSwipe(block.id, Direction.RIGHT);
+          cleanupDrag();
+        } else if (dx < -20) {
+          onSwipe(block.id, Direction.LEFT);
+          cleanupDrag();
+        }
+      } else {
+        if (dy > 20) {
+          onSwipe(block.id, Direction.DOWN);
+          cleanupDrag();
+        } else if (dy < -20) {
+          onSwipe(block.id, Direction.UP);
+          cleanupDrag();
+        }
+      }
+    }
+  };
 
+  const handleMouseUpWindow = () => {
+    cleanupDrag();
+  };
+
+  const cleanupDrag = () => {
     mouseStart.current = null;
+    dragging.current = false;
+    window.removeEventListener('mousemove', handleMouseMove);
+    window.removeEventListener('mouseup', handleMouseUpWindow);
   };
 
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!isSelected) {
-        audioService.playSelect();
+      audioService.playSelect();
     }
     onClick(block.id);
+  };
+
+  // Keyboard: Enter/Space to select block
+  const handleKeyDownBlock = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (onKeyDown) onKeyDown(e);
+    if ((e.key === 'Enter' || e.key === ' ') && !isSelected) {
+      audioService.playSelect();
+      onClick(block.id);
+    }
   };
 
   const getStyles = () => {
@@ -147,7 +183,7 @@ export const BlockComponent = forwardRef<HTMLDivElement, BlockProps>(
     <div
       ref={ref}
       tabIndex={tabIndex}
-      onKeyDown={onKeyDown}
+      onKeyDown={handleKeyDownBlock}
       onFocus={onFocus}
       onClick={handleClick}
       onTouchStart={handleTouchStart}

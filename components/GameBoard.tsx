@@ -2,10 +2,10 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Block, BlockType, Direction } from '../types';
 import { GRID_WIDTH, GRID_HEIGHT, WIN_COORDS } from '../constants';
 import { BlockComponent } from './BlockComponent';
-import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCcw, Play, Settings2, Undo2, Lightbulb } from 'lucide-react';
+import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCcw, Play, Undo2, Lightbulb } from 'lucide-react';
 import { findSolution } from '../services/solver';
 import { audioService } from '../services/audioService';
-import { getPuzzleHint } from '../services/geminiService';
+
 
 interface GameBoardProps {
   blocks: Block[];
@@ -20,13 +20,13 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [history, setHistory] = useState<{blocks: Block[], moves: number}[]>([]);
   
-  // Hint State
+  // Auto-solve (computer move) state
   const [isSolving, setIsSolving] = useState(false);
+  const [isPlayingAuto, setIsPlayingAuto] = useState(false);
+  const [autoSteps, setAutoSteps] = useState(1);
+  const [autoMessage, setAutoMessage] = useState<string | null>(null);
   const [isPlayingHint, setIsPlayingHint] = useState(false);
-  const [hintSteps, setHintSteps] = useState(1);
-  const [hintMessage, setHintMessage] = useState<string | null>(null);
-  const [hintData, setHintData] = useState<{blockId: string, direction: Direction} | null>(null);
-  const [loadingHint, setLoadingHint] = useState(false);
+  const [hintData, setHintData] = useState<{ blockId: string; direction: Direction; message: string } | null>(null);
 
   // Responsive sizing
   const containerRef = useRef<HTMLDivElement>(null);
@@ -36,6 +36,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
   // Refs for access inside intervals/callbacks
   const blocksRef = useRef(blocks);
   const movesRef = useRef(moves);
+  const hintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   useEffect(() => {
     blocksRef.current = blocks;
@@ -81,6 +82,33 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
     return occupied;
   }, []);
 
+  const clearHintTimeout = useCallback(() => {
+    if (hintTimeoutRef.current) {
+      clearTimeout(hintTimeoutRef.current);
+      hintTimeoutRef.current = null;
+    }
+  }, []);
+
+  const clearHint = useCallback(() => {
+    clearHintTimeout();
+    setHintData(null);
+    setIsPlayingHint(false);
+  }, [clearHintTimeout]);
+
+  useEffect(() => {
+    return () => clearHintTimeout();
+  }, [clearHintTimeout]);
+
+  const directionToText = useCallback((dir: Direction) => {
+    switch (dir) {
+      case Direction.UP: return 'up';
+      case Direction.DOWN: return 'down';
+      case Direction.LEFT: return 'left';
+      case Direction.RIGHT: return 'right';
+      default: return '';
+    }
+  }, []);
+
   const handleUndo = () => {
     setHistory(prev => {
         if (prev.length === 0) return prev;
@@ -92,8 +120,8 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
             setMoves(lastState.moves);
             
             // Clear hints on undo
-            setHintData(null);
-            setHintMessage(null);
+            setAutoMessage(null);
+            clearHint();
         }
         return newHistory;
     });
@@ -101,12 +129,17 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
 
   const handleReset = () => {
     setHistory([]);
-    setHintData(null);
-    setHintMessage(null);
+    setAutoMessage(null);
+    clearHint();
     onReset();
   };
 
   const moveBlock = useCallback((direction: Direction, autoId?: string) => {
+    if (isPlayingAuto) return;
+    if (isPlayingHint) {
+      clearHint();
+    }
+
     const targetId = autoId || selectedBlockId;
     if (!targetId) return;
 
@@ -154,10 +187,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
     audioService.playMove();
 
     // Clear Hint if player moves
-    setHintData(null);
-    if (!autoId) {
-        setHintMessage(null);
-    }
+    setAutoMessage(null);
 
     // Save history BEFORE updating state
     setHistory(prev => [...prev, { blocks: currentBlocks, moves: currentMoves }]);
@@ -169,20 +199,22 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
       audioService.playWin();
       setTimeout(onWin, 300);
     }
-  }, [selectedBlockId, setBlocks, setMoves, getOccupiedCells, onWin]);
+  }, [selectedBlockId, setBlocks, setMoves, getOccupiedCells, onWin, isPlayingAuto, isPlayingHint, clearHint]);
 
   const handleSwipe = (id: string, direction: Direction) => {
-      if (isPlayingHint) return;
+      if (isPlayingAuto) return;
       setSelectedBlockId(id);
+      clearHint();
       moveBlock(direction, id);
   };
 
   // Keyboard controls
   useEffect(() => {
-    if (isPlayingHint) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!selectedBlockId) return;
+      if (!selectedBlockId || isPlayingAuto) return;
+      if (isPlayingHint) {
+        clearHint();
+      }
       switch (e.key) {
         case 'ArrowUp': moveBlock(Direction.UP); break;
         case 'ArrowDown': moveBlock(Direction.DOWN); break;
@@ -196,103 +228,103 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedBlockId, moveBlock, isPlayingHint]);
+  }, [selectedBlockId, moveBlock, isPlayingAuto, isPlayingHint, clearHint]);
 
-  // Solver / Auto-Play Logic
+  const handleGetHint = useCallback(() => {
+    if (isSolving || isPlayingAuto) return;
+    clearHintTimeout();
+    setIsPlayingHint(true);
+    setAutoMessage("Finding a smart hint...");
+
+    const solution = findSolution(blocks);
+    if (!solution || solution.length === 0) {
+      const message = solution === null ? "No hint available for this layout." : "Already solved!";
+      setAutoMessage(message);
+      hintTimeoutRef.current = window.setTimeout(() => {
+        setAutoMessage(null);
+        setIsPlayingHint(false);
+      }, 2500);
+      return;
+    }
+
+    const nextMove = solution[0];
+    const block = blocks[nextMove.blockIndex];
+    if (!block) {
+      setAutoMessage("No hint available right now.");
+      hintTimeoutRef.current = window.setTimeout(() => {
+        setAutoMessage(null);
+        setIsPlayingHint(false);
+      }, 2000);
+      return;
+    }
+
+    const directionLabel = directionToText(nextMove.direction);
+    const message = `Try moving ${block.label || 'that block'} ${directionLabel}.`;
+
+    setHintData({ blockId: block.id, direction: nextMove.direction, message });
+    setSelectedBlockId(block.id);
+    setAutoMessage(message);
+
+    hintTimeoutRef.current = window.setTimeout(() => {
+      setHintData(null);
+      setAutoMessage(null);
+      setIsPlayingHint(false);
+    }, 4000);
+  }, [blocks, isPlayingAuto, isSolving, clearHintTimeout, directionToText]);
+
+  // Auto-solve (computer move) logic
   const handleAutoSolve = async () => {
-    if (isPlayingHint || loadingHint) return;
-    
+    if (isPlayingAuto) return;
+    clearHint();
     setIsSolving(true);
-    setHintMessage("Calculating best moves...");
-    
+    setAutoMessage("Computer is moving...");
     setTimeout(() => {
-        const solution = findSolution(blocks);
-        setIsSolving(false);
-
-        if (!solution || solution.length === 0) {
-            setHintMessage(solution === null ? "No solution found!" : "Already solved!");
-            setTimeout(() => setHintMessage(null), 3000);
-            return;
+      const solution = findSolution(blocks);
+      setIsSolving(false);
+      if (!solution || solution.length === 0) {
+        setAutoMessage(solution === null ? "No solution found!" : "Already solved!");
+        setTimeout(() => setAutoMessage(null), 3000);
+        return;
+      }
+      const stepsToShow = autoSteps === -1 ? solution.length : Math.min(solution.length, autoSteps);
+      const movesToApply = solution.slice(0, stepsToShow);
+      setIsPlayingAuto(true);
+      setSelectedBlockId(null);
+      let i = 0;
+      const interval = setInterval(() => {
+        if (i >= movesToApply.length) {
+          clearInterval(interval);
+          setAutoMessage(null);
+          setIsPlayingAuto(false);
+          return;
         }
-
-        const stepsToShow = hintSteps === -1 ? solution.length : Math.min(solution.length, hintSteps);
-        const movesToApply = solution.slice(0, stepsToShow);
-        
-        setIsPlayingHint(true);
-        setSelectedBlockId(null);
-        setHintData(null); // Clear any visual arrows
-
-        let i = 0;
-        const interval = setInterval(() => {
-            if (i >= movesToApply.length) {
-                clearInterval(interval);
-                setHintMessage(null);
-                setIsPlayingHint(false);
-                return;
-            }
-            
-            const move = movesToApply[i];
-            const currentBlocks = blocksRef.current; 
-            const currentMoves = movesRef.current;
-            
-            const index = move.blockIndex;
-            const block = currentBlocks[index];
-            
-            if (block) {
-                let nx = block.x;
-                let ny = block.y;
-                if (move.direction === Direction.UP) ny--;
-                else if (move.direction === Direction.DOWN) ny++;
-                else if (move.direction === Direction.LEFT) nx--;
-                else if (move.direction === Direction.RIGHT) nx++;
-                
-                const newBlocks = [...currentBlocks];
-                newBlocks[index] = { ...block, x: nx, y: ny };
-                
-                audioService.playMove();
-
-                setHistory(prev => [...prev, { blocks: currentBlocks, moves: currentMoves }]);
-
-                setBlocks(newBlocks);
-                setMoves(m => m + 1);
-                
-                setSelectedBlockId(block.id);
-                
-                if (block.type === BlockType.KING && nx === WIN_COORDS.x && ny === WIN_COORDS.y) {
-                    audioService.playWin();
-                    setTimeout(onWin, 300);
-                }
-            }
-            i++;
-        }, 250);
-
-    }, 100);
-  };
-
-  const handleGetHint = async () => {
-      if (loadingHint || isPlayingHint) return;
-      setLoadingHint(true);
-      setHintMessage("Thinking...");
-
-      // 1. Calculate visual next step
-      setTimeout(async () => {
-          const solution = findSolution(blocks);
-          
-          if (solution && solution.length > 0) {
-              const nextMove = solution[0];
-              const targetBlock = blocks[nextMove.blockIndex];
-              setHintData({ blockId: targetBlock.id, direction: nextMove.direction });
-          } else {
-              setHintMessage(solution === null ? "Stuck? Try Resetting." : "You won!");
-              setLoadingHint(false);
-              return;
+        const move = movesToApply[i];
+        const currentBlocks = blocksRef.current;
+        const currentMoves = movesRef.current;
+        const index = move.blockIndex;
+        const block = currentBlocks[index];
+        if (block) {
+          let nx = block.x;
+          let ny = block.y;
+          if (move.direction === Direction.UP) ny--;
+          else if (move.direction === Direction.DOWN) ny++;
+          else if (move.direction === Direction.LEFT) nx--;
+          else if (move.direction === Direction.RIGHT) nx++;
+          const newBlocks = [...currentBlocks];
+          newBlocks[index] = { ...block, x: nx, y: ny };
+          audioService.playMove();
+          setHistory(prev => [...prev, { blocks: currentBlocks, moves: currentMoves }]);
+          setBlocks(newBlocks);
+          setMoves(m => m + 1);
+          setSelectedBlockId(block.id);
+          if (block.type === BlockType.KING && nx === WIN_COORDS.x && ny === WIN_COORDS.y) {
+            audioService.playWin();
+            setTimeout(onWin, 300);
           }
-
-          // 2. Fetch Text Hint
-          const text = await getPuzzleHint(blocks);
-          setHintMessage(text);
-          setLoadingHint(false);
-      }, 50);
+        }
+        i++;
+      }, 250);
+    }, 100);
   };
 
   const boardWidth = GRID_WIDTH * unitSize + (GRID_WIDTH - 1) * gap;
@@ -338,7 +370,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
          <div className="flex items-center gap-2 flex-wrap justify-end">
              <button 
                 onClick={handleUndo}
-                disabled={history.length === 0 || isPlayingHint}
+                disabled={history.length === 0}
                 className="p-2 rounded-xl bg-slate-200 text-slate-600 hover:bg-slate-300 transition-colors shadow-sm disabled:opacity-50"
                 title="Undo"
              >
@@ -348,7 +380,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
              {/* Hint Button */}
              <button 
                 onClick={handleGetHint}
-                disabled={loadingHint || isPlayingHint}
+                disabled={isSolving || isPlayingAuto || isPlayingHint}
                 className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-100 text-amber-700 font-bold hover:bg-amber-200 transition-all shadow-sm disabled:opacity-50"
                 title="Get a hint"
              >
@@ -356,30 +388,30 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
                 <span className="hidden sm:inline">Hint</span>
              </button>
 
-             {/* Auto Solve Group */}
-             <div className={`flex items-center bg-slate-100 rounded-xl p-1 border border-slate-200 ${isPlayingHint ? 'opacity-50 pointer-events-none' : ''}`}>
-                 <select 
-                    value={hintSteps} 
-                    onChange={(e) => setHintSteps(Number(e.target.value))}
-                    className="bg-transparent text-xs font-bold text-slate-500 outline-none cursor-pointer px-1"
-                 >
-                     <option value={1}>1 Step</option>
-                     <option value={5}>5 Steps</option>
-                     <option value={-1}>All</option>
-                 </select>
-                 <button 
-                    onClick={handleAutoSolve}
-                    disabled={isSolving}
-                    className="ml-1 p-1.5 rounded-lg bg-white text-slate-600 shadow-sm hover:text-amber-500 transition-colors"
-                    title="Auto Play"
-                 >
-                    {isSolving ? <span className="animate-spin text-xs">⏳</span> : <Play size={14} fill="currentColor" />}
-                 </button>
+             {/* Computer Move (Auto-Solve) Group */}
+             <div className={`flex items-center bg-slate-100 rounded-xl p-1 border border-slate-200 ${isPlayingAuto ? 'opacity-50 pointer-events-none' : ''}`}>
+                <select 
+                  value={autoSteps} 
+                  onChange={(e) => setAutoSteps(Number(e.target.value))}
+                  className="bg-transparent text-xs font-bold text-slate-500 outline-none cursor-pointer px-1"
+                >
+                  <option value={1}>1 Step</option>
+                  <option value={5}>5 Steps</option>
+                  <option value={-1}>All</option>
+                </select>
+                <button 
+                  onClick={handleAutoSolve}
+                  disabled={isSolving}
+                  className="ml-1 p-1.5 rounded-lg bg-white text-slate-600 shadow-sm hover:text-amber-500 transition-colors"
+                  title="Let Computer Move"
+                >
+                  {isSolving ? <span className="animate-spin text-xs">⏳</span> : <Play size={14} fill="currentColor" />}
+                </button>
              </div>
              
              <button 
                 onClick={handleReset}
-                disabled={isPlayingHint}
+                disabled={false}
                 className="p-2 rounded-xl bg-slate-200 text-slate-600 hover:bg-slate-300 transition-colors shadow-sm disabled:opacity-50"
                 title="Reset"
              >
@@ -388,22 +420,22 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
          </div>
       </div>
 
-      {hintMessage && (
+        {autoMessage && (
           <div className="absolute top-24 z-40 max-w-xs w-full px-4 animate-fade-in pointer-events-none">
-             <div className="bg-slate-800/90 text-white px-4 py-3 rounded-2xl text-sm backdrop-blur-md shadow-xl border border-slate-700 text-center">
-              {hintMessage}
-             </div>
+           <div className="bg-slate-800/90 text-white px-4 py-3 rounded-2xl text-sm backdrop-blur-md shadow-xl border border-slate-700 text-center">
+            {autoMessage}
+           </div>
           </div>
-      )}
+        )}
 
       {/* The Board */}
       <div 
-        className={`relative bg-slate-800 rounded-xl p-3 shadow-2xl border-b-8 border-slate-900 transition-all duration-300 ${isPlayingHint ? 'pointer-events-none' : ''}`}
+        className="relative bg-slate-800 rounded-xl p-3 shadow-2xl border-b-8 border-slate-900 transition-all duration-300"
         style={{
           width: boardWidth + 24, // + padding
           height: boardHeight + 24,
         }}
-        onClick={() => !isPlayingHint && setSelectedBlockId(null)}
+        onClick={() => setSelectedBlockId(null)}
       >
         <div className="relative w-full h-full">
             {blocks.map((block, idx) => (
@@ -431,36 +463,48 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
         </div>
       </div>
 
-      {/* Mobile Controls */}
-      <div className={`mt-6 grid grid-cols-3 gap-3 ${isPlayingHint ? 'opacity-50 pointer-events-none' : ''}`}>
+      {/* Mobile Controls: Only show on touch devices */}
+      <div
+        className="mt-6 grid grid-cols-3 gap-3"
+        style={{ display: 'none' }}
+        id="mobile-controls"
+      >
         <div />
-        <button 
-            className="w-14 h-14 flex items-center justify-center bg-white rounded-2xl shadow-sm border-b-4 border-slate-200 active:border-b-0 active:translate-y-1 active:bg-slate-50 text-slate-600 transition-all"
-            onClick={(e) => { e.stopPropagation(); moveBlock(Direction.UP); }}
+        <button
+          className="w-14 h-14 flex items-center justify-center bg-white rounded-2xl shadow-sm border-b-4 border-slate-200 active:border-b-0 active:translate-y-1 active:bg-slate-50 text-slate-600 transition-all"
+          onClick={e => { e.stopPropagation(); moveBlock(Direction.UP); }}
         >
-            <ArrowUp size={24} />
+          <ArrowUp size={24} />
         </button>
         <div />
-        
-        <button 
-            className="w-14 h-14 flex items-center justify-center bg-white rounded-2xl shadow-sm border-b-4 border-slate-200 active:border-b-0 active:translate-y-1 active:bg-slate-50 text-slate-600 transition-all"
-            onClick={(e) => { e.stopPropagation(); moveBlock(Direction.LEFT); }}
+        <button
+          className="w-14 h-14 flex items-center justify-center bg-white rounded-2xl shadow-sm border-b-4 border-slate-200 active:border-b-0 active:translate-y-1 active:bg-slate-50 text-slate-600 transition-all"
+          onClick={e => { e.stopPropagation(); moveBlock(Direction.LEFT); }}
         >
-            <ArrowLeft size={24} />
+          <ArrowLeft size={24} />
         </button>
-        <button 
-            className="w-14 h-14 flex items-center justify-center bg-white rounded-2xl shadow-sm border-b-4 border-slate-200 active:border-b-0 active:translate-y-1 active:bg-slate-50 text-slate-600 transition-all"
-            onClick={(e) => { e.stopPropagation(); moveBlock(Direction.DOWN); }}
+        <button
+          className="w-14 h-14 flex items-center justify-center bg-white rounded-2xl shadow-sm border-b-4 border-slate-200 active:border-b-0 active:translate-y-1 active:bg-slate-50 text-slate-600 transition-all"
+          onClick={e => { e.stopPropagation(); moveBlock(Direction.DOWN); }}
         >
-            <ArrowDown size={24} />
+          <ArrowDown size={24} />
         </button>
-        <button 
-            className="w-14 h-14 flex items-center justify-center bg-white rounded-2xl shadow-sm border-b-4 border-slate-200 active:border-b-0 active:translate-y-1 active:bg-slate-50 text-slate-600 transition-all"
-            onClick={(e) => { e.stopPropagation(); moveBlock(Direction.RIGHT); }}
+        <button
+          className="w-14 h-14 flex items-center justify-center bg-white rounded-2xl shadow-sm border-b-4 border-slate-200 active:border-b-0 active:translate-y-1 active:bg-slate-50 text-slate-600 transition-all"
+          onClick={e => { e.stopPropagation(); moveBlock(Direction.RIGHT); }}
         >
-            <ArrowRight size={24} />
+          <ArrowRight size={24} />
         </button>
       </div>
+
+      {/* Show mobile controls only on touch devices */}
+      <script dangerouslySetInnerHTML={{
+        __html: `
+          if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+            document.getElementById('mobile-controls').style.display = 'grid';
+          }
+        `
+      }} />
 
     </div>
   );

@@ -2,8 +2,10 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Block, BlockType, Direction } from '../types';
 import { GRID_WIDTH, GRID_HEIGHT, WIN_COORDS } from '../constants';
 import { BlockComponent } from './BlockComponent';
-import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCcw, Lightbulb, Play, Settings2 } from 'lucide-react';
-import { findSolution, SimplifiedMove } from '../services/solver';
+import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCcw, Play, Settings2, Undo2, Lightbulb } from 'lucide-react';
+import { findSolution } from '../services/solver';
+import { audioService } from '../services/audioService';
+import { getPuzzleHint } from '../services/geminiService';
 
 interface GameBoardProps {
   blocks: Block[];
@@ -16,17 +18,29 @@ interface GameBoardProps {
 
 export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, setMoves, onWin, onReset }) => {
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
+  const [history, setHistory] = useState<{blocks: Block[], moves: number}[]>([]);
   
   // Hint State
   const [isSolving, setIsSolving] = useState(false);
   const [isPlayingHint, setIsPlayingHint] = useState(false);
   const [hintSteps, setHintSteps] = useState(1);
   const [hintMessage, setHintMessage] = useState<string | null>(null);
+  const [hintData, setHintData] = useState<{blockId: string, direction: Direction} | null>(null);
+  const [loadingHint, setLoadingHint] = useState(false);
 
   // Responsive sizing
   const containerRef = useRef<HTMLDivElement>(null);
   const [unitSize, setUnitSize] = useState(80);
   const gap = 10; 
+
+  // Refs for access inside intervals/callbacks
+  const blocksRef = useRef(blocks);
+  const movesRef = useRef(moves);
+  
+  useEffect(() => {
+    blocksRef.current = blocks;
+    movesRef.current = moves;
+  }, [blocks, moves]);
 
   // Resize Observer
   useEffect(() => {
@@ -37,7 +51,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
       const { clientWidth, clientHeight } = containerRef.current;
       
       const padding = 32; 
-      const controlsHeight = 140; 
+      const controlsHeight = 160; 
       const availableHeight = clientHeight - controlsHeight - padding;
       const availableWidth = clientWidth - padding;
 
@@ -67,61 +81,105 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
     return occupied;
   }, []);
 
+  const handleUndo = () => {
+    setHistory(prev => {
+        if (prev.length === 0) return prev;
+        const newHistory = [...prev];
+        const lastState = newHistory.pop();
+        if (lastState) {
+            audioService.playUndo();
+            setBlocks(lastState.blocks);
+            setMoves(lastState.moves);
+            
+            // Clear hints on undo
+            setHintData(null);
+            setHintMessage(null);
+        }
+        return newHistory;
+    });
+  };
+
+  const handleReset = () => {
+    setHistory([]);
+    setHintData(null);
+    setHintMessage(null);
+    onReset();
+  };
+
   const moveBlock = useCallback((direction: Direction, autoId?: string) => {
     const targetId = autoId || selectedBlockId;
     if (!targetId) return;
 
-    setBlocks(prevBlocks => {
-      const blockIndex = prevBlocks.findIndex(b => b.id === targetId);
-      if (blockIndex === -1) return prevBlocks;
+    const currentBlocks = blocksRef.current;
+    const currentMoves = movesRef.current;
 
-      const block = prevBlocks[blockIndex];
-      let newX = block.x;
-      let newY = block.y;
+    const blockIndex = currentBlocks.findIndex(b => b.id === targetId);
+    if (blockIndex === -1) return;
 
-      switch (direction) {
-        case Direction.UP: newY -= 1; break;
-        case Direction.DOWN: newY += 1; break;
-        case Direction.LEFT: newX -= 1; break;
-        case Direction.RIGHT: newX += 1; break;
-      }
+    const block = currentBlocks[blockIndex];
+    let newX = block.x;
+    let newY = block.y;
 
-      // Check boundaries
-      if (newX < 0 || newY < 0 || newX + block.width > GRID_WIDTH || newY + block.height > GRID_HEIGHT) {
-        return prevBlocks;
-      }
+    switch (direction) {
+      case Direction.UP: newY -= 1; break;
+      case Direction.DOWN: newY += 1; break;
+      case Direction.LEFT: newX -= 1; break;
+      case Direction.RIGHT: newX += 1; break;
+    }
 
-      // Check collisions
-      const occupied = getOccupiedCells(prevBlocks, targetId);
-      let collision = false;
-      for (let dx = 0; dx < block.width; dx++) {
-        for (let dy = 0; dy < block.height; dy++) {
-          if (occupied.has(`${newX + dx},${newY + dy}`)) {
-            collision = true;
-            break;
-          }
+    // Check boundaries
+    if (newX < 0 || newY < 0 || newX + block.width > GRID_WIDTH || newY + block.height > GRID_HEIGHT) {
+      return;
+    }
+
+    // Check collisions
+    const occupied = getOccupiedCells(currentBlocks, targetId);
+    let collision = false;
+    for (let dx = 0; dx < block.width; dx++) {
+      for (let dy = 0; dy < block.height; dy++) {
+        if (occupied.has(`${newX + dx},${newY + dy}`)) {
+          collision = true;
+          break;
         }
       }
+    }
 
-      if (collision) return prevBlocks;
+    if (collision) return;
 
-      // Successful Move
-      const newBlocks = [...prevBlocks];
-      newBlocks[blockIndex] = { ...block, x: newX, y: newY };
-      
-      setMoves(m => m + 1);
+    // Successful Move
+    const newBlocks = [...currentBlocks];
+    newBlocks[blockIndex] = { ...block, x: newX, y: newY };
+    
+    // Play sound
+    audioService.playMove();
 
-      if (block.type === BlockType.KING && newX === WIN_COORDS.x && newY === WIN_COORDS.y) {
-        setTimeout(onWin, 300);
-      }
+    // Clear Hint if player moves
+    setHintData(null);
+    if (!autoId) {
+        setHintMessage(null);
+    }
 
-      return newBlocks;
-    });
+    // Save history BEFORE updating state
+    setHistory(prev => [...prev, { blocks: currentBlocks, moves: currentMoves }]);
+
+    setBlocks(newBlocks);
+    setMoves(m => m + 1);
+
+    if (block.type === BlockType.KING && newX === WIN_COORDS.x && newY === WIN_COORDS.y) {
+      audioService.playWin();
+      setTimeout(onWin, 300);
+    }
   }, [selectedBlockId, setBlocks, setMoves, getOccupiedCells, onWin]);
+
+  const handleSwipe = (id: string, direction: Direction) => {
+      if (isPlayingHint) return;
+      setSelectedBlockId(id);
+      moveBlock(direction, id);
+  };
 
   // Keyboard controls
   useEffect(() => {
-    if (isPlayingHint) return; // Disable keyboard during hint
+    if (isPlayingHint) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!selectedBlockId) return;
@@ -140,9 +198,9 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedBlockId, moveBlock, isPlayingHint]);
 
-  // Solver Logic
-  const handleSolve = async () => {
-    if (isPlayingHint) return;
+  // Solver / Auto-Play Logic
+  const handleAutoSolve = async () => {
+    if (isPlayingHint || loadingHint) return;
     
     setIsSolving(true);
     setHintMessage("Calculating best moves...");
@@ -151,14 +209,8 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
         const solution = findSolution(blocks);
         setIsSolving(false);
 
-        if (!solution) {
-            setHintMessage("No solution found from here! Try resetting.");
-            setTimeout(() => setHintMessage(null), 3000);
-            return;
-        }
-
-        if (solution.length === 0) {
-            setHintMessage("You've already won!");
+        if (!solution || solution.length === 0) {
+            setHintMessage(solution === null ? "No solution found!" : "Already solved!");
             setTimeout(() => setHintMessage(null), 3000);
             return;
         }
@@ -167,7 +219,8 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
         const movesToApply = solution.slice(0, stepsToShow);
         
         setIsPlayingHint(true);
-        setSelectedBlockId(null); // Deselect user selection
+        setSelectedBlockId(null);
+        setHintData(null); // Clear any visual arrows
 
         let i = 0;
         const interval = setInterval(() => {
@@ -179,13 +232,13 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
             }
             
             const move = movesToApply[i];
+            const currentBlocks = blocksRef.current; 
+            const currentMoves = movesRef.current;
             
-            // Directly apply move without re-checking collision (solver guarantees valid moves)
-            setBlocks(currentBlocks => {
-                const index = move.blockIndex;
-                const block = currentBlocks[index];
-                if (!block) return currentBlocks;
-
+            const index = move.blockIndex;
+            const block = currentBlocks[index];
+            
+            if (block) {
                 let nx = block.x;
                 let ny = block.y;
                 if (move.direction === Direction.UP) ny--;
@@ -196,22 +249,50 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
                 const newBlocks = [...currentBlocks];
                 newBlocks[index] = { ...block, x: nx, y: ny };
                 
-                // Highlight the block being moved by hint
+                audioService.playMove();
+
+                setHistory(prev => [...prev, { blocks: currentBlocks, moves: currentMoves }]);
+
+                setBlocks(newBlocks);
+                setMoves(m => m + 1);
+                
                 setSelectedBlockId(block.id);
                 
-                // Check win during hint
                 if (block.type === BlockType.KING && nx === WIN_COORDS.x && ny === WIN_COORDS.y) {
+                    audioService.playWin();
                     setTimeout(onWin, 300);
                 }
-
-                return newBlocks;
-            });
-            
-            setMoves(m => m + 1);
+            }
             i++;
-        }, 250); // Fast playback
+        }, 250);
 
     }, 100);
+  };
+
+  const handleGetHint = async () => {
+      if (loadingHint || isPlayingHint) return;
+      setLoadingHint(true);
+      setHintMessage("Thinking...");
+
+      // 1. Calculate visual next step
+      setTimeout(async () => {
+          const solution = findSolution(blocks);
+          
+          if (solution && solution.length > 0) {
+              const nextMove = solution[0];
+              const targetBlock = blocks[nextMove.blockIndex];
+              setHintData({ blockId: targetBlock.id, direction: nextMove.direction });
+          } else {
+              setHintMessage(solution === null ? "Stuck? Try Resetting." : "You won!");
+              setLoadingHint(false);
+              return;
+          }
+
+          // 2. Fetch Text Hint
+          const text = await getPuzzleHint(blocks);
+          setHintMessage(text);
+          setLoadingHint(false);
+      }, 50);
   };
 
   const boardWidth = GRID_WIDTH * unitSize + (GRID_WIDTH - 1) * gap;
@@ -221,45 +302,59 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
     <div ref={containerRef} className="w-full h-full flex flex-col items-center justify-center">
       
       {/* Top Bar */}
-      <div className="flex w-full max-w-md justify-between items-center mb-4 px-2">
+      <div className="flex w-full max-w-lg justify-between items-center mb-4 px-2 gap-2">
          <div className="flex items-center gap-2 bg-white/80 rounded-xl px-3 py-2 shadow-sm border border-slate-200">
              <span className="text-xs text-slate-400 font-bold uppercase">Moves</span>
              <span className="text-xl font-bold text-slate-700 font-mono min-w-[3ch] text-center">{moves}</span>
          </div>
 
-         <div className="flex items-center gap-2">
-             <div className={`flex items-center bg-white/80 rounded-xl px-2 py-1 shadow-sm border border-slate-200 ${isPlayingHint ? 'opacity-50 pointer-events-none' : ''}`}>
-                 <Settings2 size={16} className="text-slate-400 mr-2" />
+         <div className="flex items-center gap-2 flex-wrap justify-end">
+             <button 
+                onClick={handleUndo}
+                disabled={history.length === 0 || isPlayingHint}
+                className="p-2 rounded-xl bg-slate-200 text-slate-600 hover:bg-slate-300 transition-colors shadow-sm disabled:opacity-50"
+                title="Undo"
+             >
+                <Undo2 size={20} />
+             </button>
+
+             {/* Hint Button */}
+             <button 
+                onClick={handleGetHint}
+                disabled={loadingHint || isPlayingHint}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-100 text-amber-700 font-bold hover:bg-amber-200 transition-all shadow-sm disabled:opacity-50"
+                title="Get a hint"
+             >
+                <Lightbulb size={18} fill={hintData ? "currentColor" : "none"} />
+                <span className="hidden sm:inline">Hint</span>
+             </button>
+
+             {/* Auto Solve Group */}
+             <div className={`flex items-center bg-slate-100 rounded-xl p-1 border border-slate-200 ${isPlayingHint ? 'opacity-50 pointer-events-none' : ''}`}>
                  <select 
                     value={hintSteps} 
                     onChange={(e) => setHintSteps(Number(e.target.value))}
-                    className="bg-transparent text-sm font-bold text-slate-600 outline-none cursor-pointer"
+                    className="bg-transparent text-xs font-bold text-slate-500 outline-none cursor-pointer px-1"
                  >
                      <option value={1}>1 Step</option>
-                     <option value={3}>3 Steps</option>
                      <option value={5}>5 Steps</option>
-                     <option value={10}>10 Steps</option>
-                     <option value={-1}>Solve All</option>
+                     <option value={-1}>All</option>
                  </select>
+                 <button 
+                    onClick={handleAutoSolve}
+                    disabled={isSolving}
+                    className="ml-1 p-1.5 rounded-lg bg-white text-slate-600 shadow-sm hover:text-amber-500 transition-colors"
+                    title="Auto Play"
+                 >
+                    {isSolving ? <span className="animate-spin text-xs">⏳</span> : <Play size={14} fill="currentColor" />}
+                 </button>
              </div>
              
              <button 
-                onClick={handleSolve}
-                disabled={isSolving || isPlayingHint}
-                className={`flex items-center gap-2 px-3 py-2 rounded-xl font-bold transition-all shadow-sm ${
-                    isSolving || isPlayingHint 
-                    ? 'bg-amber-200 text-amber-700' 
-                    : 'bg-amber-400 text-white hover:bg-amber-500 hover:-translate-y-0.5'
-                }`}
-             >
-                {isSolving ? <span className="animate-spin">⏳</span> : <Play size={18} fill="currentColor" />}
-                {isSolving ? '...' : (isPlayingHint ? 'Playing...' : 'Hint')}
-             </button>
-             
-             <button 
-                onClick={onReset}
+                onClick={handleReset}
                 disabled={isPlayingHint}
                 className="p-2 rounded-xl bg-slate-200 text-slate-600 hover:bg-slate-300 transition-colors shadow-sm disabled:opacity-50"
+                title="Reset"
              >
                 <RotateCcw size={20} />
              </button>
@@ -267,8 +362,10 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
       </div>
 
       {hintMessage && (
-          <div className="absolute top-20 z-30 bg-black/75 text-white px-4 py-2 rounded-full text-sm animate-fade-in backdrop-blur-sm pointer-events-none">
+          <div className="absolute top-24 z-40 max-w-xs w-full px-4 animate-fade-in pointer-events-none">
+             <div className="bg-slate-800/90 text-white px-4 py-3 rounded-2xl text-sm backdrop-blur-md shadow-xl border border-slate-700 text-center">
               {hintMessage}
+             </div>
           </div>
       )}
 
@@ -287,7 +384,9 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
                 key={block.id}
                 block={block}
                 isSelected={block.id === selectedBlockId}
+                hintDirection={hintData?.blockId === block.id ? hintData.direction : null}
                 onClick={setSelectedBlockId}
+                onSwipe={handleSwipe}
                 unitSize={unitSize}
                 gap={gap}
             />

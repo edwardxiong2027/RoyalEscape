@@ -298,6 +298,33 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
   const boardWidth = GRID_WIDTH * unitSize + (GRID_WIDTH - 1) * gap;
   const boardHeight = GRID_HEIGHT * unitSize + (GRID_HEIGHT - 1) * gap;
 
+  // For keyboard focus management
+  const blockRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  // Focus the selected block when selectedBlockId changes
+  useEffect(() => {
+    if (selectedBlockId && blockRefs.current) {
+      const idx = blocks.findIndex(b => b.id === selectedBlockId);
+      if (idx !== -1 && blockRefs.current[idx]) {
+        blockRefs.current[idx]?.focus();
+      }
+    }
+  }, [selectedBlockId, blocks]);
+
+  // Handle Tab/Shift+Tab navigation
+  const handleBlockKeyDown = (e: React.KeyboardEvent<HTMLDivElement>, idx: number) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      let nextIdx;
+      if (e.shiftKey) {
+        nextIdx = (idx - 1 + blocks.length) % blocks.length;
+      } else {
+        nextIdx = (idx + 1) % blocks.length;
+      }
+      setSelectedBlockId(blocks[nextIdx].id);
+    }
+  };
+
   return (
     <div ref={containerRef} className="w-full h-full flex flex-col items-center justify-center">
       
@@ -379,8 +406,8 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
         onClick={() => !isPlayingHint && setSelectedBlockId(null)}
       >
         <div className="relative w-full h-full">
-            {blocks.map(block => (
-            <BlockComponent
+            {blocks.map((block, idx) => (
+              <BlockComponent
                 key={block.id}
                 block={block}
                 isSelected={block.id === selectedBlockId}
@@ -389,7 +416,11 @@ export const GameBoard: React.FC<GameBoardProps> = ({ blocks, setBlocks, moves, 
                 onSwipe={handleSwipe}
                 unitSize={unitSize}
                 gap={gap}
-            />
+                tabIndex={0}
+                ref={el => blockRefs.current[idx] = el}
+                onKeyDown={e => handleBlockKeyDown(e, idx)}
+                onFocus={() => setSelectedBlockId(block.id)}
+              />
             ))}
         </div>
         

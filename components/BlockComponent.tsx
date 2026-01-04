@@ -1,9 +1,10 @@
-import React, { useRef } from 'react';
+import React, { useRef, forwardRef } from 'react';
 import { Block, BlockType, Direction } from '../types';
 import { Crown, Shield, Sword, User, ArrowUp, ArrowDown, ArrowLeft, ArrowRight } from 'lucide-react';
 import { audioService } from '../services/audioService';
 
-interface BlockProps {
+
+interface BlockProps extends React.HTMLAttributes<HTMLDivElement> {
   block: Block;
   isSelected: boolean;
   hintDirection?: Direction | null;
@@ -13,7 +14,8 @@ interface BlockProps {
   gap: number;
 }
 
-export const BlockComponent: React.FC<BlockProps> = ({ block, isSelected, hintDirection, onClick, onSwipe, unitSize, gap }) => {
+export const BlockComponent = forwardRef<HTMLDivElement, BlockProps>(
+  ({ block, isSelected, hintDirection, onClick, onSwipe, unitSize, gap, tabIndex = -1, onKeyDown, onFocus, ...rest }, ref) => {
   const touchStart = useRef<{x: number, y: number} | null>(null);
   const mouseStart = useRef<{x: number, y: number} | null>(null);
 
@@ -143,6 +145,10 @@ export const BlockComponent: React.FC<BlockProps> = ({ block, isSelected, hintDi
 
   return (
     <div
+      ref={ref}
+      tabIndex={tabIndex}
+      onKeyDown={onKeyDown}
+      onFocus={onFocus}
       onClick={handleClick}
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
@@ -156,6 +162,7 @@ export const BlockComponent: React.FC<BlockProps> = ({ block, isSelected, hintDi
         height: `${height}px`,
         ...getAnimation()
       }}
+      {...rest}
     >
       {getIcon()}
       {block.type !== BlockType.PAWN && (
@@ -166,4 +173,4 @@ export const BlockComponent: React.FC<BlockProps> = ({ block, isSelected, hintDi
       {renderHintArrow()}
     </div>
   );
-};
+});

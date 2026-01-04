@@ -15,6 +15,7 @@ interface BlockProps {
 
 export const BlockComponent: React.FC<BlockProps> = ({ block, isSelected, hintDirection, onClick, onSwipe, unitSize, gap }) => {
   const touchStart = useRef<{x: number, y: number} | null>(null);
+  const mouseStart = useRef<{x: number, y: number} | null>(null);
 
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -40,6 +41,30 @@ export const BlockComponent: React.FC<BlockProps> = ({ block, isSelected, hintDi
         }
     }
     touchStart.current = null;
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    mouseStart.current = { x: e.clientX, y: e.clientY };
+  };
+
+  const handleMouseUp = (e: React.MouseEvent) => {
+    if (!mouseStart.current) return;
+
+    const dx = e.clientX - mouseStart.current.x;
+    const dy = e.clientY - mouseStart.current.y;
+
+    // Same threshold as touch; treat as swipe if movement is meaningful
+    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+        e.stopPropagation();
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+            onSwipe(block.id, dx > 0 ? Direction.RIGHT : Direction.LEFT);
+        } else {
+            onSwipe(block.id, dy > 0 ? Direction.DOWN : Direction.UP);
+        }
+    }
+
+    mouseStart.current = null;
   };
 
   const handleClick = (e: React.MouseEvent) => {
@@ -121,6 +146,8 @@ export const BlockComponent: React.FC<BlockProps> = ({ block, isSelected, hintDi
       onClick={handleClick}
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
+      onMouseDown={handleMouseDown}
+      onMouseUp={handleMouseUp}
       className={getStyles()}
       style={{
         left: `${left}px`,
